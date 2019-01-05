@@ -14,6 +14,7 @@
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <iostream>
+#include <unistd.h>
 
 using namespace cv;
 
@@ -38,8 +39,12 @@ public:
   {
     boost::asio::io_service io_service;
 
+    std::string localPort = "8023";
+    if (port != "8037")
+      localPort = "8024";
+
     udp::endpoint local_endpoint = boost::asio::ip::udp::endpoint(
-    boost::asio::ip::address::from_string("127.0.0.1"), boost::lexical_cast<int>("8023"));
+    boost::asio::ip::address::from_string("127.0.0.1"), boost::lexical_cast<int>(localPort));
 
     udp::socket socket(io_service);
     socket.open(udp::v4());
@@ -51,7 +56,7 @@ public:
     size_t len = socket.receive_from(
         boost::asio::buffer(meta.memptr(), sizeof(int32_t) * 2), sender_endpoint);
 
-    size_t packetSize = 20 * sizeof(int32_t);
+    size_t packetSize = 100 * sizeof(int32_t);
     arma::Mat<int32_t> data(meta(0), 1);
 
     size_t b = sizeof(int32_t) * data.n_elem;
@@ -94,8 +99,8 @@ public:
     meta[0] = functionID;
     meta[1] = data.n_elem;
     socket_.send_to(boost::asio::buffer(meta), endpoint_);
-
-    size_t packetSize = 10 * sizeof(double);
+    usleep(100000);
+    size_t packetSize = 100 * sizeof(double);
 
     size_t u = 0;
     size_t b = sizeof(double) * data.n_elem;
@@ -115,6 +120,7 @@ public:
         idx += (count / sizeof(double));
         b -= count;
       }
+      usleep(5000);
     }
 
     recv(x, y);
@@ -127,9 +133,6 @@ private:
   std::string host;
   std::string port;
 };
-
-
-// ENS_HAS_EXACT_METHOD_FORM(Evaluate, HasEvaluate)
 
 ENS_HAS_MEM_FUNC(BatchSize, HasBatchSize);
 
@@ -151,21 +154,28 @@ class WrapperFunction
                   const size_t begin,
                   const size_t batchSize)
   {
-    const double result = function.Evaluate(coordinates, begin, batchSize);
-
-    // coordinatesHistory.push_back(coordinates);
-    // evaluateHistory.push_back(result);
-
-    return result;
+    return function.Evaluate(coordinates, begin, batchSize);
   }
 
   double Evaluate(const arma::mat& coordinates)
   {
     return function.Evaluate(coordinates);
+  }
 
-    // coordinatesHistory.push_back(coordinates);
-    // evaluateHistory.push_back(result);
-    // return result;
+  double EvaluateWithGradient(const arma::mat& coordinates,
+                              const size_t begin,
+                              arma::mat& gradient,
+                              const size_t batchSize)
+  {
+    function.Gradient(coordinates, begin, gradient, batchSize);
+
+    // Store results.
+    const double result = function.Evaluate(coordinates);
+    coordinatesHistory.push_back(coordinates);
+    evaluateHistory.push_back(result);
+    normHistory.push_back(arma::norm(gradient));
+
+    return result;
   }
 
   void Gradient(const arma::mat& coordinates,
@@ -199,16 +209,9 @@ class WrapperFunction
         coordinatesHistory.size());
     for (size_t i = 0; i < coordinatesHistory.size(); ++i)
     {
-      // data(0, i) = i;
-      // data.submat(1, i, 2, i) = coordinatesHistory[i];
-      // data(data.n_rows - 1, i) = evaluateHistory[i];
-
       data(0, i) = evaluateHistory[i];
       data(1, i) = normHistory[i];
       data.submat(2, i, 3, i) = coordinatesHistory[i];
-
-      // data.submat(1, i, 2, i) = coordinatesHistory[i];
-      // data(data.n_rows - 1, i) = evaluateHistory[i];
     }
   }
 
@@ -262,8 +265,50 @@ void OptimizeOptimizer(OptimizerType& optimizer,
 
   if (mode == 1 || mode == 3)
   {
-    UDPClient client("192.168.8.28", "8037");
-    client.send(coordinates, functionID, x, y);
+    arma::Mat<int> state;
+    size_t stateIndex;
+    bool oc = state.load("state/state.csv", arma::csv_ascii);
+
+    if (!oc)
+    {
+      state = arma::Mat<int>(2, 1);
+      state(0) = 0;
+      state(1) = 0;
+      state.save("state/state.csv", arma::csv_ascii);
+    }
+
+    std::string port = "";
+    if (state(0) == 0)
+    {
+      port = "8037";
+      stateIndex = 0;
+    }
+    else if (state(1) == 0)
+    {
+      port = "8038";
+      stateIndex = 1;
+    }
+
+    if (port != "")
+    {
+      state(stateIndex) = 1;
+      state.save("state/state.csv", arma::csv_ascii);
+
+      UDPClient client("192.168.8.28", port);
+
+      arma::uvec indices(3);
+      indices(0) = 0;
+      indices(1) = 2;
+      indices(2) = 3;
+
+      arma::mat coordinatesSub = coordinates.rows(indices);
+      if (coordinatesSub.n_elem < 10000)
+        client.send(coordinatesSub, functionID, x, y);
+
+      state.load("state/state.csv", arma::csv_ascii);
+      state(stateIndex) = 0;
+      state.save("state/state.csv", arma::csv_ascii);
+    }
   }
 }
 
@@ -543,7 +588,7 @@ int main(void)
   AdaGrad adaGradOpt(stepSize, 1, 1e-8, iterations, 1e-9, false);
   CNE cneOpt(parameterA, iterations, stepSize, parameterB, parameterC, 0.1);
   SMORMS3 smormsOpt(stepSize, 1, 1e-16, iterations, 1e-9, false);
-  // IQN iqnOpt(stepSize, 1, iterations, 1e-9);
+  IQN iqnOpt(stepSize, 1, iterations, 1e-9);
   CMAES<> cmaesOpt(0, parameterA, parameterB, 1, iterations, 1e-9);
   AdaMax adaMaxOpt(stepSize, 1, parameterA, parameterB, 1e-8, iterations,
       1e-9, false);
@@ -560,15 +605,15 @@ int main(void)
   SA<ExponentialSchedule> saOpt(schedule, iterations, stepSize, parameterA,
       parameterB, 1e-9, 3, parameterC, parameterD, 0.3);
   SPALeRASGD<> spalerasgdOpt(stepSize, 1, iterations, 1e-4);
-  // Katyusha katyushaOpt(stepSize, parameterA, 1, iterations,
-  //     parameterB, 1e-9, false);
-  // KatyushaProximal katyushaProximalOpt(stepSize, parameterA, 1, iterations,
-  //     parameterB, 1e-9, false);
+  Katyusha katyushaOpt(stepSize, parameterA, 1, iterations,
+      parameterB, 1e-9, false);
+  KatyushaProximal katyushaProximalOpt(stepSize, parameterA, 1, iterations,
+      parameterB, 1e-9, false);
   SVRG svrgOpt(stepSize, 1, iterations, parameterB, 1e-9, false);
   SVRG_BB svrgBBOpt(stepSize, 1, iterations, parameterB, 1e-9, false,
       SVRGUpdate(), BarzilaiBorweinDecay(parameterC));
-  // SARAH sarahOpt(stepSize, 1, iterations, 0, 1e-9, false);
-  // SARAH_Plus sarahPlusOpt(stepSize, 1, iterations, 0, 1e-9, false);
+  SARAH sarahOpt(stepSize, 1, iterations, 0, 1e-9, false);
+  SARAH_Plus sarahPlusOpt(stepSize, 1, iterations, 0, 1e-9, false);
 
   if (optimizer == "adam")
   {
@@ -596,7 +641,7 @@ int main(void)
   }
   else if (optimizer == "iqn")
   {
-    // OptimizeFunction(iqnOpt, functionID, mode, x, y);
+    OptimizeFunction(iqnOpt, functionID, mode, x, y);
   }
   else if (optimizer == "cmaes")
   {
@@ -640,11 +685,11 @@ int main(void)
   }
   else if (optimizer == "katyusha")
   {
-    // OptimizeFunction(katyushaOpt, functionID, mode, x, y);
+    OptimizeFunction(katyushaOpt, functionID, mode, x, y);
   }
   else if (optimizer == "katyushaproximal")
   {
-    // OptimizeFunction(katyushaProximalOpt, functionID, mode, x, y);
+    OptimizeFunction(katyushaProximalOpt, functionID, mode, x, y);
   }
   else if (optimizer == "svrg")
   {
@@ -654,14 +699,14 @@ int main(void)
   {
     OptimizeFunction(svrgBBOpt, functionID, mode, x, y);
   }
-  // else if (optimizer == "sarah")
-  // {
-  //   OptimizeFunction(sarahOpt, functionID, mode, x, y);
-  // }
-  // else if (optimizer == "sarahplus")
-  // {
-  //   OptimizeFunction(sarahPlusOpt, functionID, mode, x, y);
-  // }
+  else if (optimizer == "sarah")
+  {
+    OptimizeFunction(sarahOpt, functionID, mode, x, y);
+  }
+  else if (optimizer == "sarahplus")
+  {
+    OptimizeFunction(sarahPlusOpt, functionID, mode, x, y);
+  }
 
   return 0;
 }
