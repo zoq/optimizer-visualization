@@ -10,6 +10,14 @@
 #include "boost/lexical_cast.hpp"
 #include <boost/array.hpp>
 #include <boost/asio.hpp>
+#include <boost/asio/deadline_timer.hpp>
+#include <boost/asio/io_service.hpp>
+#include <boost/asio/ip/udp.hpp>
+#include <cstdlib>
+#include <boost/bind.hpp>
+#include <boost/date_time/posix_time/posix_time_types.hpp>
+#include <iostream>
+
 
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
@@ -23,6 +31,88 @@ using namespace ens::test;
 using namespace ens::sfinae;
 using namespace arma;
 using boost::asio::ip::udp;
+using boost::asio::deadline_timer;
+
+
+class UDPReceiveClient
+{
+public:
+  UDPReceiveClient(const udp::endpoint& listen_endpoint)
+    : socket_(io_service_, listen_endpoint),
+      deadline_(io_service_)
+  {
+    // No deadline is required until the first socket operation is started. We
+    // set the deadline to positive infinity so that the actor takes no action
+    // until a specific deadline is set.
+    deadline_.expires_at(boost::posix_time::pos_infin);
+
+    // Start the persistent actor that checks for deadline expiry.
+    check_deadline();
+  }
+
+  std::size_t receive(const boost::asio::mutable_buffer& buffer,
+      boost::posix_time::time_duration timeout, boost::system::error_code& ec)
+  {
+    // Set a deadline for the asynchronous operation.
+    deadline_.expires_from_now(timeout);
+
+    // Set up the variables that receive the result of the asynchronous
+    // operation. The error code is set to would_block to signal that the
+    // operation is incomplete. Asio guarantees that its asynchronous
+    // operations will never fail with would_block, so any other value in
+    // ec indicates completion.
+    ec = boost::asio::error::would_block;
+    std::size_t length = 0;
+
+    // Start the asynchronous operation itself. The handle_receive function
+    // used as a callback will update the ec and length variables.
+    socket_.async_receive(boost::asio::buffer(buffer),
+        boost::bind(&UDPReceiveClient::handle_receive, _1, _2, &ec, &length));
+
+    // Block until the asynchronous operation has completed.
+    do io_service_.run_one(); while (ec == boost::asio::error::would_block);
+
+    return length;
+  }
+
+private:
+  void check_deadline()
+  {
+    // Check whether the deadline has passed. We compare the deadline against
+    // the current time since a new asynchronous operation may have moved the
+    // deadline before this actor had a chance to run.
+    if (deadline_.expires_at() <= deadline_timer::traits_type::now())
+    {
+      // The deadline has passed. The outstanding asynchronous operation needs
+      // to be cancelled so that the blocked receive() function will return.
+      //
+      // Please note that cancel() has portability issues on some versions of
+      // Microsoft Windows, and it may be necessary to use close() instead.
+      // Consult the documentation for cancel() for further information.
+      socket_.cancel();
+
+      // There is no longer an active deadline. The expiry is set to positive
+      // infinity so that the actor takes no action until a new deadline is set.
+      deadline_.expires_at(boost::posix_time::pos_infin);
+    }
+
+    // Put the actor back to sleep.
+    deadline_.async_wait(boost::bind(&UDPReceiveClient::check_deadline, this));
+  }
+
+  static void handle_receive(
+      const boost::system::error_code& ec, std::size_t length,
+      boost::system::error_code* out_ec, std::size_t* out_length)
+  {
+    *out_ec = ec;
+    *out_length = length;
+  }
+
+private:
+  boost::asio::io_service io_service_;
+  udp::socket socket_;
+  deadline_timer deadline_;
+};
 
 class UDPClient
 {
@@ -35,59 +125,76 @@ public:
     // socket_.close();
   }
 
-  void recv(const double x, const double y)
+  size_t recv(const double x, const double y)
   {
-    boost::asio::io_service io_service;
-
-    std::string localPort = "8023";
-    if (port != "8037")
-      localPort = "8024";
-
-    udp::endpoint local_endpoint = boost::asio::ip::udp::endpoint(
-    boost::asio::ip::address::from_string("127.0.0.1"), boost::lexical_cast<int>(localPort));
-
-    udp::socket socket(io_service);
-    socket.open(udp::v4());
-    socket.bind(local_endpoint);
-
-   arma::Mat<int32_t> meta(1, 1);
-
-    udp::endpoint sender_endpoint;
-    size_t len = socket.receive_from(
-        boost::asio::buffer(meta.memptr(), sizeof(int32_t) * 2), sender_endpoint);
-
-    size_t packetSize = 100 * sizeof(int32_t);
-    arma::Mat<int32_t> data(meta(0), 1);
-
-    size_t b = sizeof(int32_t) * data.n_elem;
-    size_t idx = 0;
-    while(b > 0)
+    size_t recvSize = 0;
+    try
     {
-      if (b > packetSize)
+      boost::asio::io_service io_service;
+
+      std::string localPort = "8023";
+      if (port != "8037")
+        localPort = "8024";
+
+      udp::endpoint local_endpoint = boost::asio::ip::udp::endpoint(
+      boost::asio::ip::address::from_string("127.0.0.1"), boost::lexical_cast<int>(localPort));
+
+      UDPReceiveClient c(local_endpoint);
+
+       boost::system::error_code ec;
+       arma::Mat<int32_t> meta(1, 1);
+       c.receive(boost::asio::buffer(meta.memptr(), sizeof(int32_t) * 1),
+          boost::posix_time::seconds(10), ec);
+
+      if (ec)
+        return recvSize;
+
+      size_t packetSize = 100 * sizeof(int32_t);
+      arma::Mat<int32_t> data(meta(0), 1);
+
+      size_t b = sizeof(int32_t) * data.n_elem;
+      size_t idx = 0;
+      while(b > 0)
       {
-        const size_t count = socket.receive_from(
-          boost::asio::buffer(data.memptr() + idx, packetSize), sender_endpoint);
-        idx += (count / sizeof(int32_t));
-        b -= count;
+        if (b > packetSize)
+        {
+          const size_t count =  c.receive(boost::asio::buffer(data.memptr() + idx,
+              packetSize), boost::posix_time::seconds(2), ec);
+          idx += (count / sizeof(int32_t));
+          b -= count;
+          recvSize += count;
+        }
+        else
+        {
+          const size_t count =  c.receive(boost::asio::buffer(
+              data.memptr() + idx, b), boost::posix_time::seconds(2), ec);
+          idx += (count / sizeof(int32_t));
+          b -= count;
+          recvSize += count;
+        }
+
+        if (ec)
+          return recvSize;
       }
-      else
-      {
-        const size_t count = socket.receive_from(
-          boost::asio::buffer(data.memptr() + idx, b), sender_endpoint);
-        idx += (count / sizeof(int32_t));
-        b -= count;
-      }
+
+      std::cout << "i" << std::endl;
+
+      std::cout << x << " " << y << std::endl;
+
+      std::cout << data << std::endl;
+    }
+    catch (std::exception& e)
+    {
+      return recvSize;
     }
 
-    std::cout << "i" << std::endl;
-
-    std::cout << x << " " << y << std::endl;
-
-    std::cout << data << std::endl;
+    return recvSize;
   }
 
-  void send(const arma::mat& data, const size_t functionID, const double x, const double y)
+  size_t send(const arma::mat& data, const size_t functionID, const double x, const double y)
   {
+    size_t recvSize = 0;
+
     boost::asio::io_service io_service;
     udp::socket socket_(io_service, udp::endpoint(udp::v4(), 0));
 
@@ -99,7 +206,7 @@ public:
     meta[0] = functionID;
     meta[1] = data.n_elem;
     socket_.send_to(boost::asio::buffer(meta), endpoint_);
-    usleep(100000);
+    usleep(4000);
     size_t packetSize = 100 * sizeof(double);
 
     size_t u = 0;
@@ -120,15 +227,17 @@ public:
         idx += (count / sizeof(double));
         b -= count;
       }
-      usleep(5000);
+      usleep(4000);
     }
 
-    recv(x, y);
+    recvSize = recv(x, y);
     socket_.close();
+
+    return recvSize;
   }
 
 private:
-  boost::array<int, 2> meta;
+  boost::array<uint32_t, 2> meta;
 
   std::string host;
   std::string port;
@@ -291,6 +400,8 @@ void OptimizeOptimizer(OptimizerType& optimizer,
 
     if (port != "")
     {
+      size_t recvSize = 0;
+
       state(stateIndex) = 1;
       state.save("state/state.csv", arma::csv_ascii);
 
@@ -303,7 +414,13 @@ void OptimizeOptimizer(OptimizerType& optimizer,
 
       arma::mat coordinatesSub = coordinates.rows(indices);
       if (coordinatesSub.n_elem < 10000)
-        client.send(coordinatesSub, functionID, x, y);
+      {
+        for (size_t r = 0; r < 4; ++r)
+        {
+          if (client.send(coordinatesSub, functionID, x, y) > 0)
+            break;
+        }
+      }
 
       state.load("state/state.csv", arma::csv_ascii);
       state(stateIndex) = 0;
