@@ -249,7 +249,8 @@ template<class FunctionType>
 class WrapperFunction
 {
  public:
-  WrapperFunction(FunctionType& function) : function(function) { }
+  WrapperFunction(FunctionType& function, const bool evaluate) :
+      function(function), evaluate(evaluate) { }
 
   arma::mat& Coordinates() { return coordinates; }
 
@@ -263,12 +264,30 @@ class WrapperFunction
                   const size_t begin,
                   const size_t batchSize)
   {
-    return function.Evaluate(coordinates, begin, batchSize);
+    const double result = function.Evaluate(coordinates, begin, batchSize);
+
+    if (evaluate)
+    {
+      coordinatesHistory.push_back(coordinates);
+      evaluateHistory.push_back(result);
+      normHistory.push_back(0);
+    }
+
+    return result;
   }
 
   double Evaluate(const arma::mat& coordinates)
   {
-    return function.Evaluate(coordinates);
+    const double result = function.Evaluate(coordinates);
+
+    if (evaluate)
+    {
+      coordinatesHistory.push_back(coordinates);
+      evaluateHistory.push_back(result);
+      normHistory.push_back(0);
+    }
+
+    return result;
   }
 
   double EvaluateWithGradient(const arma::mat& coordinates,
@@ -330,6 +349,7 @@ class WrapperFunction
   std::vector<arma::mat> coordinatesHistory;
   std::vector<double> evaluateHistory;
   std::vector<double> normHistory;
+  bool evaluate;
 };
 
 template<typename T, typename F>
@@ -354,9 +374,10 @@ void OptimizeOptimizer(OptimizerType& optimizer,
                        const size_t mode,
                        const double x,
                        const double y,
-                       const size_t functionID)
+                       const size_t functionID,
+                       const bool evaluate = false)
 {
-  WrapperFunction<FunctionType> wf(f);
+  WrapperFunction<FunctionType> wf(f, evaluate);
 
   SetBatchSize(optimizer, f);
   wf.Coordinates() = wf.GetInitialPoint();
@@ -434,47 +455,48 @@ void OptimizeFunction(OptimizerType& optimizer,
                       const size_t functionID,
                       const size_t mode,
                       const double x,
-                      const double y)
+                      const double y,
+                      const bool evaluate = false)
 {
   if (functionID == 0)
   {
     BoothFunction f;
-    OptimizeOptimizer(optimizer, f, mode, x, y, functionID);
+    OptimizeOptimizer(optimizer, f, mode, x, y, functionID, evaluate);
   }
   else if (functionID == 1)
   {
     StyblinskiTangFunction f(2);
-    OptimizeOptimizer(optimizer, f, mode, x, y, functionID);
+    OptimizeOptimizer(optimizer, f, mode, x, y, functionID, evaluate);
   }
   else if (functionID == 2)
   {
     BukinFunction f;
-    OptimizeOptimizer(optimizer, f, mode, x, y, functionID);
+    OptimizeOptimizer(optimizer, f, mode, x, y, functionID, evaluate);
   }
   else if (functionID == 3)
   {
     DropWaveFunction f;
-    OptimizeOptimizer(optimizer, f, mode, x, y, functionID);
+    OptimizeOptimizer(optimizer, f, mode, x, y, functionID, evaluate);
   }
   else if (functionID == 4)
   {
     McCormickFunction f;
-    OptimizeOptimizer(optimizer, f, mode, x, y, functionID);
+    OptimizeOptimizer(optimizer, f, mode, x, y, functionID, evaluate);
   }
   else if (functionID == 5)
   {
     RastriginFunction f(2);
-    OptimizeOptimizer(optimizer, f, mode, x, y, functionID);
+    OptimizeOptimizer(optimizer, f, mode, x, y, functionID, evaluate);
   }
   else if (functionID == 6)
   {
     SphereFunction f(2);
-    OptimizeOptimizer(optimizer, f, mode, x, y, functionID);
+    OptimizeOptimizer(optimizer, f, mode, x, y, functionID, evaluate);
   }
   else if (functionID == 7)
   {
     EasomFunction f;
-    OptimizeOptimizer(optimizer, f, mode, x, y, functionID);
+    OptimizeOptimizer(optimizer, f, mode, x, y, functionID, evaluate);
   }
 }
 
@@ -511,9 +533,7 @@ int main(void)
   std::string optimizer;
   size_t functionID;
   double x, y;
-  size_t iterations;
-  double stepSize;
-  double parameterA, parameterB, parameterC, parameterD;
+  double parameterA, parameterB, parameterC, parameterD, parameterE, parameterF;
 
   std::cout << "Content-type: text/html" << std::endl;
   std::cout << "Cache-Control: max-age=3600" << std::endl;
@@ -524,15 +544,12 @@ int main(void)
      >> parameter >> functionID
      >> parameter >> x
      >> parameter >> y
-     >> parameter >> iterations
-     >> parameter >> stepSize
-     >> parameter >> parameterA
      >> parameter >> parameterB
+     >> parameter >> parameterA
      >> parameter >> parameterC
-     >> parameter >> parameterD;
-
-  if (iterations <= 0 || iterations > 20000)
-    return 0;
+     >> parameter >> parameterD
+     >> parameter >> parameterE
+     >> parameter >> parameterF;
 
   // Data not well-formatted.
   if (ss.fail())
@@ -698,39 +715,37 @@ int main(void)
     y *= -1;
   }
 
-  Adam adamOpt(stepSize, 1, parameterB, parameterC, parameterD, iterations,
-      parameterA, false);
-  RMSProp rmsPropOpt(stepSize, 1, parameterA, 1e-8, iterations, 1e-9, false);
-  AdaDelta adaDeltaOpt(stepSize, 1, parameterA, 1e-8, iterations, 1e-9, false);
-  AdaGrad adaGradOpt(stepSize, 1, 1e-8, iterations, 1e-9, false);
-  CNE cneOpt(parameterA, iterations, stepSize, parameterB, parameterC, 0.1);
-  SMORMS3 smormsOpt(stepSize, 1, 1e-16, iterations, 1e-9, false);
-  IQN iqnOpt(stepSize, 1, iterations, 1e-9);
-  CMAES<> cmaesOpt(0, parameterA, parameterB, 1, iterations, 1e-9);
-  AdaMax adaMaxOpt(stepSize, 1, parameterA, parameterB, 1e-8, iterations,
-      1e-9, false);
-  AMSGrad amsGradOpt(stepSize, 1, parameterA, parameterB, 1e-8, iterations,
-      1e-9, false);
-  Nadam nadamOpt(stepSize, 1, parameterA, parameterB, 1e-8, iterations,
-      1e-9, false);
-  StandardSGD sgdOpt(stepSize, 1, iterations, 1e-9, false);
-  MomentumSGD sgdMomentumOpt(stepSize, 1, iterations, 1e-9, false,
-      MomentumUpdate(parameterA));
-  L_BFGS lbfgsOpt(stepSize, iterations, parameterA, 1e-4, parameterB, 1e-9);
-  GradientDescent gdOpt(stepSize, iterations, 1e-9);
+  Adam adamOpt(parameterA, 1, parameterD, parameterE, parameterF, parameterB, parameterC, false);
+  RMSProp rmsPropOpt(parameterA, 1, parameterD, parameterE, parameterB, parameterC, false);
+  AdaDelta adaDeltaOpt(parameterA, 1, parameterD, parameterE, parameterB, parameterC, false);
+  AdaGrad adaGradOpt(parameterA, 1, parameterD, parameterB, parameterC, false);
+  CNE cneOpt(parameterA, parameterB, parameterC, parameterD, parameterE, parameterF);
+  SMORMS3 smormsOpt(parameterA, 1, parameterD, parameterB, parameterC, false);
+  IQN iqnOpt(parameterA, 1, parameterB, parameterC);
+  CMAES<> cmaesOpt(parameterA, parameterC, parameterD, 1, parameterB, parameterE);
+  AdaMax adaMaxOpt(parameterA, 1, parameterD, parameterE, parameterF, parameterB, parameterC, false);
+  AMSGrad amsGradOpt(parameterA, 1, parameterD, parameterE, parameterF, parameterB, parameterC, false);
+  Nadam nadamOpt(parameterA, 1, parameterD, parameterE, parameterF, parameterB, parameterC, false);
+  StandardSGD sgdOpt(parameterA, 1, parameterB, parameterC, false);
+  MomentumSGD sgdMomentumOpt(parameterA, 1, parameterB, parameterC, false, MomentumUpdate(parameterD));
+  L_BFGS lbfgsOpt(parameterA, parameterB, parameterC, parameterD, parameterE, 1e-15, parameterF);
+  GradientDescent gdOpt(parameterA, parameterB, parameterC);
   ExponentialSchedule schedule;
-  SA<ExponentialSchedule> saOpt(schedule, iterations, stepSize, parameterA,
-      parameterB, 1e-9, 3, parameterC, parameterD, 0.3);
-  SPALeRASGD<> spalerasgdOpt(stepSize, 1, iterations, 1e-4);
-  Katyusha katyushaOpt(stepSize, parameterA, 1, iterations,
-      parameterB, 1e-9, false);
-  KatyushaProximal katyushaProximalOpt(stepSize, parameterA, 1, iterations,
-      parameterB, 1e-9, false);
-  SVRG svrgOpt(stepSize, 1, iterations, parameterB, 1e-9, false);
-  SVRG_BB svrgBBOpt(stepSize, 1, iterations, parameterB, 1e-9, false,
-      SVRGUpdate(), BarzilaiBorweinDecay(parameterC));
-  SARAH sarahOpt(stepSize, 1, iterations, 0, 1e-9, false);
-  SARAH_Plus sarahPlusOpt(stepSize, 1, iterations, 0, 1e-9, false);
+  SA<ExponentialSchedule> saOpt(schedule, parameterA, parameterB, parameterC, parameterF, parameterD, 3, 20, 0.3, parameterE);
+  SPALeRASGD<> spalerasgdOpt(parameterA, 1, parameterB, parameterC, parameterD, parameterE, parameterF, 3.10e-8, false);
+  Katyusha katyushaOpt(parameterA, parameterB, 1, parameterC, parameterD, parameterE, false);
+  KatyushaProximal katyushaProximalOpt(parameterA, parameterB, 1, parameterC, parameterD, parameterE, false);
+  SVRG svrgOpt(parameterA, 1, parameterB, parameterC, parameterD, false);
+  SVRG_BB svrgBBOpt(parameterA, 1, parameterB, parameterC, parameterD, false, SVRGUpdate(), BarzilaiBorweinDecay(parameterE, parameterF));
+  SARAH sarahOpt(parameterA, 1, parameterB, parameterC, parameterD, false);
+  SARAHType<SARAHPlusUpdate> sarahPlusOpt(parameterA, 1, parameterB, parameterC, parameterD, false, SARAHPlusUpdate(parameterE));
+  NadaMax nadaMaxOpt(parameterA, 1, parameterD, parameterE, parameterF, parameterB, parameterC, false);
+  OptimisticAdam optimisticAdamOpt(parameterA, 1, parameterD, parameterE, parameterF, parameterB, parameterC, false);
+  Eve eveOpt(parameterA, 1, parameterD, parameterE, parameterF, 1e-8, 10, parameterB, parameterC, false);
+  FTML ftmlOpt(parameterA, 1, parameterD, parameterE, parameterF, parameterB, false);
+  Padam pAdamOpt(parameterA, 1, parameterD, parameterE, parameterF, 1e-8, parameterB, parameterC, false);
+  SWATS swatsOpt(parameterA, 1, parameterD, parameterE, parameterF, parameterB, parameterC, false);
+  WNGrad wnGradOpt(parameterA, 1, parameterB, parameterC, false);
 
   if (optimizer == "adam")
   {
@@ -750,7 +765,7 @@ int main(void)
   }
   else if (optimizer == "cne")
   {
-    OptimizeFunction(cneOpt, functionID, mode, x, y);
+    OptimizeFunction(cneOpt, functionID, mode, x, y, true);
   }
   else if (optimizer == "smorms")
   {
@@ -762,7 +777,7 @@ int main(void)
   }
   else if (optimizer == "cmaes")
   {
-    OptimizeFunction(cmaesOpt, functionID, mode, x, y);
+    OptimizeFunction(cmaesOpt, functionID, mode, x, y, true);
   }
   else if (optimizer == "adamax")
   {
@@ -784,7 +799,7 @@ int main(void)
   {
     OptimizeFunction(sgdMomentumOpt, functionID, mode, x, y);
   }
-  else if (optimizer == "lbfgs")
+  else if (optimizer == "l-bfgs")
   {
     OptimizeFunction(lbfgsOpt, functionID, mode, x, y);
   }
@@ -823,6 +838,34 @@ int main(void)
   else if (optimizer == "sarahplus")
   {
     OptimizeFunction(sarahPlusOpt, functionID, mode, x, y);
+  }
+  else if (optimizer == "nadamax")
+  {
+    OptimizeFunction(nadaMaxOpt, functionID, mode, x, y);
+  }
+  else if (optimizer == "optimisticadam")
+  {
+    OptimizeFunction(optimisticAdamOpt, functionID, mode, x, y);
+  }
+  else if (optimizer == "eve")
+  {
+    OptimizeFunction(eveOpt, functionID, mode, x, y);
+  }
+  else if (optimizer == "ftml")
+  {
+    OptimizeFunction(ftmlOpt, functionID, mode, x, y);
+  }
+  else if (optimizer == "padam")
+  {
+    OptimizeFunction(pAdamOpt, functionID, mode, x, y);
+  }
+  else if (optimizer == "swats")
+  {
+    OptimizeFunction(swatsOpt, functionID, mode, x, y);
+  }
+  else if (optimizer == "wngrad")
+  {
+    OptimizeFunction(wnGradOpt, functionID, mode, x, y);
   }
 
   return 0;
